@@ -729,6 +729,9 @@ static float InnerProductDistanceBf16(const void* a, const void* b, const void *
 }
 class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
     DISTFUNC<float> fstdistfunc_;
+#ifdef USE_AMX
+    AMXDISTFUNC<float> amxdistfunc_;
+#endif
     size_t data_size_;
     size_t dim_;
  public:
