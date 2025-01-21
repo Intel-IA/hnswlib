@@ -1,7 +1,48 @@
 #pragma once
 #include "hnswlib.h"
-
+#include <sys/syscall.h> 
+#include <sys/time.h>
+#include <sys/syscall.h> 
+#include <unistd.h>
 namespace hnswlib {
+
+#if defined(USE_AMX)
+
+#define u64 unsigned long long
+#define u8  unsigned char
+#define u16 unsigned short int
+
+#define XFEATURE_XTILECFG           17
+#define XFEATURE_XTILEDATA          18
+#define XFEATURE_MASK_XTILECFG      (1 << XFEATURE_XTILECFG)
+#define XFEATURE_MASK_XTILEDATA     (1 << XFEATURE_XTILEDATA)
+#define XFEATURE_MASK_XTILE         (XFEATURE_MASK_XTILECFG | XFEATURE_MASK_XTILEDATA)
+#define ARCH_GET_XCOMP_PERM         0x1022
+#define ARCH_REQ_XCOMP_PERM         0x1023        
+
+int enable_amx() {
+    unsigned long bitmask = 0;
+    long status = syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &bitmask);
+    if (0 != status) {
+        std::cout << "SYS_arch_prctl(READ) error" << std::endl;
+        return 0;
+    }
+    if (bitmask & XFEATURE_MASK_XTILEDATA) {
+        return 1;
+    }
+    status = syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA);
+    if (0 != status) {
+        std::cout << "SYS_arch_prctl(WRITE) error" << std::endl;
+        return 0;
+    }
+    status = syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &bitmask);
+    if (0 != status || !(bitmask & XFEATURE_MASK_XTILEDATA)) {
+        std::cout << "SYS_arch_prctl(READ) error" << std::endl;
+        return 0;
+    }
+    return 1;
+}
+#endif
 
 static float
 InnerProduct(const void *pVect1, const void *pVect2, const void *qty_ptr) {
@@ -17,6 +58,8 @@ static float
 InnerProductDistance(const void *pVect1, const void *pVect2, const void *qty_ptr) {
     return 1.0f - InnerProduct(pVect1, pVect2, qty_ptr);
 }
+
+
 
 #if defined(USE_AVX)
 
@@ -250,6 +293,7 @@ InnerProductDistanceSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const
 
 #endif
 
+
 #if defined(USE_SSE)
 
 static float
@@ -304,6 +348,7 @@ InnerProductDistanceSIMD16ExtSSE(const void *pVect1v, const void *pVect2v, const
 
 #endif
 
+
 #if defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512)
 static DISTFUNC<float> InnerProductSIMD16Ext = InnerProductSIMD16ExtSSE;
 static DISTFUNC<float> InnerProductSIMD4Ext = InnerProductSIMD4ExtSSE;
@@ -339,8 +384,236 @@ InnerProductDistanceSIMD4ExtResiduals(const void *pVect1v, const void *pVect2v, 
 }
 #endif
 
+#if defined(USE_AMX)
+float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQueryMatrix, uint64_t dims,uint64_t batchSizeA,
+                              uint64_t batchSizeB, float *results){
+    int DIM=32;
+    int blockCount=(dims)/DIM;
+    int tailCount=dims%DIM;
+    unsigned char maBf16[1024] __attribute__((aligned(64)));
+    unsigned char mbBf16[1024] __attribute__((aligned(64)));
+
+    //thread_local unsigned char *mbBf16=NULL;
+    thread_local char *preQuery=NULL;
+    thread_local char cfg[64]={0};
+    thread_local bool init_mem=false;
+ 
+    if(!init_mem){
+
+/*         if(!mbBf16){
+          mbBf16 =(unsigned char *)aligned_alloc(64,sizeof(char)*dims*4);
+        } */
+        cfg[0]=1;
+        cfg[16]=DIM*2;
+        cfg[48] = 16;  // row->M
+        // matrix B need a layout rearragement
+        cfg[16+1*2] = batchSizeB*2*2;   // col = N*4
+        cfg[48+1]   = DIM/2;   // row = K/4
+ 
+        cfg[22]=DIM*2;
+        cfg[51] = 16;  // row->M
+        // matrix B need a layout rearragement
+        cfg[24] = batchSizeB*2*2;   // col = N*4
+        cfg[52]   = DIM/2;   // row = K/4
+ 
+        cfg[26]=DIM*2;
+        cfg[53] = 16;  // row->M
+        // matrix B need a layout rearragement
+        cfg[28] = batchSizeB*2*2;   // col = N*4
+        cfg[54]   = DIM/2;   // row = K/4
+ 
+        cfg[16+2*2] = (batchSizeB*4); // N*sizeof(int32)
+        cfg[48+2] = 16;
+ 
+        init_mem = true;
+ 
+        _tile_loadconfig((void *)cfg);
+    }
+    __m512i high_bits;
+    __m512i low_bits;
+    __m512i all_bits;
+    int i=0;
+    for( i = 0; i < blockCount/3; i+=1) {
+        int index=3*i;
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  index * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  index * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  index * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  index * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(0,maBf16, 64);
+        _tile_loadd(1,mbBf16 , 4);
+
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+1) * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (index+1) * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (index+1) * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (index+1) * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(3,maBf16, 64);
+        _tile_loadd(4,mbBf16 , 4);
+
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+2) * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (index+2) * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (index+2) * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (index+2) * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(5,maBf16, 64);
+        _tile_loadd(6,mbBf16 , 4);
+
+        _tile_dpbf16ps(2,0,1);  
+        _tile_dpbf16ps(2,3,4);
+        _tile_dpbf16ps(2,5,6);
+    }
+    switch(blockCount%3){
+      case 0: break;
+      case 1:
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  3 * i * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  3 * i * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(0,maBf16, 64);
+        _tile_loadd(1,mbBf16, 4);
+        _tile_dpbf16ps(2,0,1);  
+        break;
+ 
+      case 2:        
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(0,maBf16, 64);
+        _tile_loadd(1,mbBf16, 4);
+
+        for(int j = 0; j < batchSizeA; j++) {
+          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (3*i+1) * DIM * 4),16);
+          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (3*i+1) * DIM * 4 + 64);
+          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+          _mm512_store_si512(maBf16 + j * DIM * 2 , all_bits);
+        }
+
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (3*i+1) * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (3*i+1) * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16 , all_bits);
+
+        _tile_loadd(3,maBf16, 64);
+        _tile_loadd(4,mbBf16, 4);
+        _tile_dpbf16ps(2,0,1);  
+        _tile_dpbf16ps(2,3,4);
+        break;
+    }
+  
+   
+    _tile_stored(2, results, batchSizeB*2*2);
+    _tile_zero(2);
+   
+    if (tailCount != 0) {
+        for (int k = 0; k < batchSizeA; k++) {
+            for (int l = 0; l < batchSizeB; l++) {
+                __m512 result_vec = _mm512_setzero_ps();
+                for (int i = 0; i < tailCount; i += 16) {
+                    __m512 lib_vec = _mm512_loadu_ps((float *)(floatLibraryMatrix[k])  + DIM * blockCount + i);
+                    __m512 query_vec = _mm512_loadu_ps((float *)(floatQueryMatrix + DIM * blockCount + i));
+                    result_vec = _mm512_fmadd_ps(lib_vec, query_vec, result_vec);
+                }
+                results[k * batchSizeB + l] += _mm512_reduce_add_ps(result_vec);
+            }
+        }
+    }
+ 
+    return 0;
+}
+
+static float InnerProductBatchExtAMX(const void **pVect1v, const void *pVect2v, const void *qty_ptr, size_t nSize, size_t mSize, float * results_amx){
+
+    unsigned int dims= *(unsigned int*)qty_ptr;
+    char **floatLibraryMatrix = (char**) pVect1v;
+    char *floatQueryMatrix = (char*) pVect2v;
+
+
+    int batchSizeA = 16, batchSizeB = 16;
+    int batchCountA = (nSize - 1) / batchSizeA + 1;
+    int batchCountB = (mSize - 1) / batchSizeB + 1;
+
+    int lastBatchSizeA = (nSize % batchSizeA == 0) ? batchSizeA : nSize % batchSizeA;
+    int lastBatchSizeB = (mSize % batchSizeB == 0) ? batchSizeB : mSize % batchSizeB;
+
+    int offsetA = batchSizeA * dims * 4;
+    int offsetB = batchSizeB * dims * 4;
+
+    float *results_ptr = results_amx;
+
+    for (int i = 0; i < batchCountA; i++) {
+        int currentBatchSizeA = (i == batchCountA - 1) ? lastBatchSizeA : batchSizeA;
+        char **currentLibraryMatrixPtr = floatLibraryMatrix + i * 16;
+
+        for (int j = 0; j < batchCountB; j++) {
+            int currentBatchSizeB = (j == batchCountB - 1) ? lastBatchSizeB : batchSizeB;
+            char *currentQueryMatrixPtr = floatQueryMatrix + j * offsetB;
+
+            amx_inner_product_matrix_fp32(currentLibraryMatrixPtr, currentQueryMatrixPtr, dims, currentBatchSizeA, currentBatchSizeB, results_ptr);
+
+            results_ptr += currentBatchSizeB * currentBatchSizeA;
+        }
+    }
+
+    return 0;
+}
+static float
+InnerProductDistanceBatchExtAMX(const void **pVect1v, const void *pVect2v, const void *qty_ptr, size_t nSize, size_t mSize, float * results_amx) {
+
+  InnerProductBatchExtAMX(pVect1v, pVect2v, qty_ptr,nSize,mSize,results_amx);
+  for(int i=0;i<nSize;i++){
+    results_amx[i]=1.0f-results_amx[i];
+  }
+    return 0;
+}
+static AMXDISTFUNC<float> InnerProductBatchExt = InnerProductBatchExtAMX;
+static AMXDISTFUNC<float> InnerProductDistanceBatchExt = InnerProductDistanceBatchExtAMX;
+#endif
+
 class InnerProductSpace : public SpaceInterface<float> {
     DISTFUNC<float> fstdistfunc_;
+#ifdef USE_AMX
+    AMXDISTFUNC<float> amxdistfunc_;
+#endif
+
     size_t data_size_;
     size_t dim_;
 
@@ -369,6 +642,8 @@ class InnerProductSpace : public SpaceInterface<float> {
         }
     #endif
 
+        
+
         if (dim % 16 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD16Ext;
         else if (dim % 4 == 0)
@@ -377,6 +652,14 @@ class InnerProductSpace : public SpaceInterface<float> {
             fstdistfunc_ = InnerProductDistanceSIMD16ExtResiduals;
         else if (dim > 4)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtResiduals;
+#endif
+#if defined(USE_AMX)
+    if (AMXCapable()) {
+        InnerProductBatchExt = InnerProductBatchExtAMX;
+        InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMX;
+    }
+
+    amxdistfunc_ = InnerProductDistanceBatchExt;
 #endif
         dim_ = dim;
         data_size_ = dim * sizeof(float);
@@ -389,6 +672,11 @@ class InnerProductSpace : public SpaceInterface<float> {
     DISTFUNC<float> get_dist_func() {
         return fstdistfunc_;
     }
+#if defined(USE_AMX)
+    AMXDISTFUNC<float> get_amx_dist_func(){
+      return amxdistfunc_;
+    }
+#endif
 
     void *get_dist_func_param() {
         return &dim_;
@@ -397,4 +685,110 @@ class InnerProductSpace : public SpaceInterface<float> {
 ~InnerProductSpace() {}
 };
 
+static float InnerProductDistanceBf16(const void* a, const void* b, const void *qty_ptr) {
+    float result[16] = {0.0f}; // 用于存储中间结果
+
+    uint16_t *x = (uint16_t *)a;
+    uint16_t *y = (uint16_t *)b;
+    __m512 vr_f32 = _mm512_setzero_ps(); // 初始化累积寄存器为0
+
+    size_t dim = * (size_t*) qty_ptr ;
+
+    size_t i = 0;
+    // 每次处理32个元素（16个__bf16元素在__m512bh寄存器中存储为32个uint16_t）
+    for (; i + 32 <= dim; i += 32) {
+        // 加载32个uint16_t到__m512i类型的临时寄存器
+        __m512i temp_x = _mm512_loadu_si512(x + i);
+        __m512i temp_y = _mm512_loadu_si512(y + i);
+
+        // 强制转换为__m512bh类型
+        __m512bh v1_f16 = reinterpret_cast<__m512bh&>(temp_x);
+        __m512bh v2_f16 = reinterpret_cast<__m512bh&>(temp_y);
+
+        // 计算BF16的点积，并将结果累加到vr_f32
+        vr_f32 = _mm512_dpbf16_ps(vr_f32, v1_f16, v2_f16);
+    }
+
+    // 将vr_f32寄存器的值存入result数组
+    _mm512_storeu_ps(result, vr_f32);
+
+    // 累加result数组的所有元素，获得最终的点积结果
+    float dot_product = 0.0f;
+    for (int j = 0; j < 16; j++) {
+        dot_product += result[j];
+    }
+
+    // 处理剩余的元素（小于32的部分）
+/*     for (; i < dim; i++) {
+        float x_val = bf162float(x[i]);
+        float y_val = bf162float(y[i]);
+        dot_product += x_val * y_val;
+    } */
+    //printf("%d %f ",dim,dot_product);
+    return 1-dot_product;
+}
+class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
+    DISTFUNC<float> fstdistfunc_;
+    size_t data_size_;
+    size_t dim_;
+ public:
+    Bf16InnerProductSpace(size_t dim) {
+        fstdistfunc_ = InnerProductDistanceBf16;
+#if defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
+    #if defined(USE_AVX512)
+        if (AVX512Capable()) {
+            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX512;
+            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX512;
+        } else if (AVXCapable()) {
+            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
+            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
+        }
+    #elif defined(USE_AVX)
+        if (AVXCapable()) {
+            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
+            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
+        }
+    #endif
+    #if defined(USE_AVX)
+        if (AVXCapable()) {
+            InnerProductSIMD4Ext = InnerProductSIMD4ExtAVX;
+            InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtAVX;
+        }
+    #endif
+
+        
+
+        if (dim % 16 == 0)
+            fstdistfunc_ = InnerProductDistanceSIMD16Ext;
+        else if (dim % 4 == 0)
+            fstdistfunc_ = InnerProductDistanceSIMD4Ext;
+        else if (dim > 16)
+            fstdistfunc_ = InnerProductDistanceSIMD16ExtResiduals;
+        else if (dim > 4)
+            fstdistfunc_ = InnerProductDistanceSIMD4ExtResiduals;
+#endif
+#if defined(USE_AMX)
+    if (AMXCapable()) {
+        InnerProductBatchExt = InnerProductBatchExtAMX;
+        InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMX;
+    }
+
+    amxdistfunc_ = InnerProductDistanceBatchExt;
+#endif
+        dim_ = dim * 2;
+        data_size_ = dim * 2  * sizeof(uint16_t);
+    }
+
+    size_t get_data_size() {
+        return data_size_;
+    }
+
+    DISTFUNC<float> get_dist_func() {
+        return fstdistfunc_;
+    }
+    void *get_dist_func_param() {
+        return &dim_;
+    }
+    ~Bf16InnerProductSpace() {}
+};
 }  // namespace hnswlib

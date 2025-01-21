@@ -14,6 +14,9 @@ namespace hnswlib {
 typedef unsigned int tableint;
 typedef unsigned int linklistsizeint;
 
+
+thread_local void **mydata=NULL;
+thread_local void *res=NULL;
 template<typename dist_t>
 class HierarchicalNSW : public AlgorithmInterface<dist_t> {
  public:
@@ -36,6 +39,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
     std::unique_ptr<VisitedListPool> visited_list_pool_{nullptr};
 
+
     // Locks operations with element by label value
     mutable std::vector<std::mutex> label_op_locks_;
 
@@ -54,6 +58,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     size_t data_size_{0};
 
     DISTFUNC<dist_t> fstdistfunc_;
+
+#if defined(USE_AMX)
+    AMXDISTFUNC<dist_t> amxdistfunc_;
+#endif
     void *dist_func_param_{nullptr};
 
     mutable std::mutex label_lookup_lock;  // lock for label_lookup_
@@ -101,6 +109,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         num_deleted_ = 0;
         data_size_ = s->get_data_size();
         fstdistfunc_ = s->get_dist_func();
+#if defined(USE_AMX)
+        amxdistfunc_ = s->get_amx_dist_func();
+#endif
         dist_func_param_ = s->get_dist_func_param();
         if ( M <= 10000 ) {
             M_ = M;
@@ -374,6 +385,22 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
 #endif
 
+#ifdef USE_AMX
+          int count=0;
+          size_t dim=(*(size_t *)dist_func_param_);
+          for (size_t j = 1; j <= size; j++) { 
+            int candidate_id = *(data + j);
+            if (!(visited_array[candidate_id] == visited_array_tag)) {
+                  char *currObj1 = (getDataByInternalId(candidate_id));
+                  mydata[count++]=currObj1;
+            }
+          }
+          if(size>0 ){
+              memset(res,0,sizeof(float)*count);
+              amxdistfunc_((const void**)mydata,(const void*)data_point,(const void*)&dim,count,1,(float*)res);
+          }  
+          count=0;    
+#endif
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
 //                    if (candidate_id == 0) continue;
@@ -386,7 +413,11 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                     visited_array[candidate_id] = visited_array_tag;
 
                     char *currObj1 = (getDataByInternalId(candidate_id));
+#ifdef USE_AMX
+                    dist_t dist=((dist_t*)res)[count++];
+#else
                     dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+#endif
 
                     bool flag_consider_candidate;
                     if (!bare_bone_search && stop_condition) {
@@ -1269,6 +1300,8 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
     std::priority_queue<std::pair<dist_t, labeltype >>
     searchKnn(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
+
+
         std::priority_queue<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
 
@@ -1287,6 +1320,36 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 metric_distance_computations+=size;
 
                 tableint *datal = (tableint *) (data + 1);
+
+#if defined(USE_AMX)
+                enable_amx();
+
+                size_t dim=(size_t)(*(size_t *)dist_func_param_);
+                if(mydata==NULL){
+                  mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
+                  res=(float*) malloc(maxM0_*sizeof(float)); 
+                  memset(res,0,maxM0_*sizeof(float));  
+                  //printf("We are 1443lines\n");
+                }
+
+                for (int i= 0; i<size;i++){
+                  tableint cand = datal[i];
+                  void* curData=getDataByInternalId(cand);
+                  mydata[i] = curData;
+                }
+                memset(res,0,sizeof(float)*size);
+                amxdistfunc_((const void**)mydata,(const void*)query_data,(const void*)&dim,size,1,(float*)res);
+
+                dist_t *myres= (dist_t *) res;
+                for (int i = 0; i < size; i++) {
+                  dist_t d=(dist_t)myres[i];
+                  if(d < curdist) {
+                    curdist=d;
+                    currObj=datal[i];
+                    changed = true;
+                  }
+                }
+#else
                 for (int i = 0; i < size; i++) {
                     tableint cand = datal[i];
                     if (cand < 0 || cand > max_elements_)
@@ -1299,6 +1362,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                         changed = true;
                     }
                 }
+#endif
             }
         }
 
