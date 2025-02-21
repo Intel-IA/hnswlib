@@ -195,30 +195,6 @@ class Int8InnerProductSpace : public hnswlib::SpaceInterface<int8_t> {
     }
     ~Int8InnerProductSpace() {}
 };
-class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
-    DISTFUNC<float> fstdistfunc_;
-    size_t data_size_;
-    size_t dim_;
- public:
-    Bf16InnerProductSpace(size_t dim) {
-        fstdistfunc_ = vector_dot_product_bf16;
-        dim_ = dim * 2;
-        data_size_ = dim * 2  * sizeof(uint16_t);
-    }
-
-    size_t get_data_size() {
-        return data_size_;
-    }
-
-    DISTFUNC<float> get_dist_func() {
-        return fstdistfunc_;
-    }
-    void *get_dist_func_param() {
-        return &dim_;
-    }
-    ~Bf16InnerProductSpace() {}
-};
-
 void setThreadAffinity(std::thread::native_handle_type handle, size_t cpuId) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
@@ -431,27 +407,27 @@ int call_AMX_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProduc
     return 0;
 }
 
-// int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace & space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
-//     //init_onednn();
-//     std::vector<hnswlib::labeltype> neighbors(max_elements);
-//     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-//         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX_bf16(data + dim * row, 1);
-//         hnswlib::labeltype label = result.top().second;
-//         neighbors[row] = label;
-//     });
-//     float correct = 0;
-//     for (int i = 0; i < max_elements; i++) {
-//         hnswlib::labeltype label = neighbors[i];
-//         if (label == i) correct++;
-//     }
-//     float recall = correct / max_elements;
-//     std::cout << "Recall: " << recall << "\n";
-//     return 0;
-// }
+int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::Bf16InnerProductSpace & space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
+    //init_onednn();
+    std::vector<hnswlib::labeltype> neighbors(max_elements);
+    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
+        hnswlib::labeltype label = result.top().second;
+        neighbors[row] = label;
+    });
+    float correct = 0;
+    for (int i = 0; i < max_elements; i++) {
+        hnswlib::labeltype label = neighbors[i];
+        if (label == i) correct++;
+    }
+    float recall = correct / max_elements;
+    std::cout << "Recall: " << recall << "\n";
+    return 0;
+}
 int main() {
     int true_dim=1024;
     int dim = true_dim/2;               // Dimension of the elements
-    size_t max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
+    size_t max_elements = 10*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
     size_t nq = max_elements;
                                 // strongly affects the memory consumption
@@ -490,24 +466,24 @@ int main() {
         float tmp =  (distrib_real(rng));
         data_fp32[i] = tmp;
         query_fp32[i] = tmp;
-/*         uint32_t *int32_data =(uint32_t *) &tmp;
-        bf_data[i]=*int32_data >> 16; */
+        uint32_t *int32_data =(uint32_t *) &tmp;
+        bf_data[i]=*int32_data >> 16;
     }
 
     hnswlib::InnerProductSpace space_fp32(true_dim);
     hnswlib::HierarchicalNSW<float>* alg_hnsw_fp32 = new hnswlib::HierarchicalNSW<float>(&space_fp32, max_elements, M, ef_construction);
     // Add data to index
-    ParallelFor_Build(0, max_elements, 43, [&](size_t row, size_t threadId) {
+    ParallelFor_Build(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         alg_hnsw_fp32->addPoint((void*)(data_fp32 + true_dim * row), row);
     });
 
     // Query the elements for themselves and measure recall
 
-    // Bf16InnerProductSpace space_bf16(dim);
-    // hnswlib::HierarchicalNSW<float>* alg_hnsw_bf16 = new hnswlib::HierarchicalNSW<float>(&space_bf16, max_elements, M, ef_construction);
-    // ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-    //     alg_hnsw_bf16->addPoint((void*)(data_bf16 + dim * row), row);
-    // });
+    hnswlib::Bf16InnerProductSpace space_bf16(true_dim);
+    hnswlib::HierarchicalNSW<float>* alg_hnsw_bf16 = new hnswlib::HierarchicalNSW<float>(&space_bf16, max_elements, M, ef_construction);
+    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+        alg_hnsw_bf16->addPoint((void*)(bf_data + true_dim * row), row);
+    });
 
 
 
@@ -515,15 +491,15 @@ int main() {
                                                start_scalar_bf16,end_scalar_bf16,
                                                start_AMX_fp32,end_AMX_fp32,
                                                 start_AMX_bf16,end_AMX_bf16;
-    // if(def_enable_fp32){
-    //     std::cout << "Default FP32 search start." <<"\n";
-    //     start_scalar_fp32 = std::chrono::high_resolution_clock::now();
-    //     for(int i=0;i<iteration;i++){
-    //       call_scalar_fp32(alg_hnsw_fp32,space_fp32,query_fp32,true_dim,nq,top_k,num_threads);
-    //     }
-    //     end_scalar_fp32 = std::chrono::high_resolution_clock::now();
-    //     std::cout << "Default FP32 search end." <<"\n-----------------------------------------------\n\n";
-    // }
+    if(def_enable_fp32){
+        std::cout << "Default FP32 search start." <<"\n";
+        start_scalar_fp32 = std::chrono::high_resolution_clock::now();
+        for(int i=0;i<iteration;i++){
+          call_scalar_fp32(alg_hnsw_fp32,space_fp32,query_fp32,true_dim,nq,top_k,num_threads);
+        }
+        end_scalar_fp32 = std::chrono::high_resolution_clock::now();
+        std::cout << "Default FP32 search end." <<"\n-----------------------------------------------\n\n";
+    }
 
 
     // if(avx512_enable_bf16){
@@ -537,26 +513,26 @@ int main() {
     // }
 
 
-    if(amx_enable_fp32){
-      std::cout << "FP32 with AMX search start." <<"\n";
-      start_AMX_fp32 = std::chrono::high_resolution_clock::now();
-      for(int i=0;i<iteration;i++){
-        call_AMX_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
-      }
-      end_AMX_fp32 = std::chrono::high_resolution_clock::now();
-      std::cout << "FP32 with AMX search end." <<"\n-----------------------------------------------\n\n";
-    }
-
-
-    // if(amx_enable_bf16){
-    //   std::cout << "BF16 with AMX search start." <<"\n";
-    //   start_AMX_bf16 = std::chrono::high_resolution_clock::now();
+    // if(amx_enable_fp32){
+    //   std::cout << "FP32 with AMX search start." <<"\n";
+    //   start_AMX_fp32 = std::chrono::high_resolution_clock::now();
     //   for(int i=0;i<iteration;i++){
-    //     call_AMX_bf16(alg_hnsw_bf16,space_bf16,data_bf16,dim,nq,top_k,num_threads);
+    //     call_AMX_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
     //   }
-    //   end_AMX_bf16 = std::chrono::high_resolution_clock::now();
-    //   std::cout << "BF16 with AVX512 search end." <<"\n-----------------------------------------------\n\n";
+    //   end_AMX_fp32 = std::chrono::high_resolution_clock::now();
+    //   std::cout << "FP32 with AMX search end." <<"\n-----------------------------------------------\n\n";
     // }
+
+
+    if(amx_enable_bf16){
+      std::cout << "BF16 with AMX search start." <<"\n";
+      start_AMX_bf16 = std::chrono::high_resolution_clock::now();
+      for(int i=0;i<iteration;i++){
+        call_AMX_bf16(alg_hnsw_bf16,space_bf16,data_bf16,dim,nq,top_k,num_threads);
+      }
+      end_AMX_bf16 = std::chrono::high_resolution_clock::now();
+      std::cout << "BF16 with AVX512 search end." <<"\n-----------------------------------------------\n\n";
+    }
   
     std::chrono::duration<double,std::milli> duration_scalar_fp32 = end_scalar_fp32 - start_scalar_fp32;
     std::chrono::duration<double,std::milli> duration_scalar_bf16 = end_scalar_bf16 - start_scalar_bf16;
