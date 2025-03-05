@@ -15,8 +15,8 @@ typedef unsigned int tableint;
 typedef unsigned int linklistsizeint;
 
 
-thread_local void **mydata=NULL;
-thread_local void *res=NULL;
+//thread_local void **mydata=NULL;
+//thread_local void *res=NULL;
 template<typename dist_t>
 class HierarchicalNSW : public AlgorithmInterface<dist_t> {
  public:
@@ -333,6 +333,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
 
         dist_t lowerBound;
+
+        void *mydata[maxM0_];
+        float res[maxM0_];
         if (bare_bone_search || 
             (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
             char* ep_data = getDataByInternalId(ep_id);
@@ -388,6 +391,8 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 #ifdef USE_AMX
           int count=0;
           size_t dim=(*(size_t *)dist_func_param_);
+
+          
           for (size_t j = 1; j <= size; j++) { 
             int candidate_id = *(data + j);
             if (!(visited_array[candidate_id] == visited_array_tag)) {
@@ -467,6 +472,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         }
 
         visited_list_pool_->releaseVisitedList(vl);
+// #ifdef USE_AMX
+//         free(mydata);
+//         free(res);
+// #endif
         return top_candidates;
     }
 
@@ -1302,6 +1311,8 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     searchKnn(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
 
 
+        void *mydata[maxM0_];
+        float res[maxM0_];
         std::priority_queue<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
 
@@ -1325,13 +1336,15 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 enable_amx();
 
                 size_t dim=(size_t)(*(size_t *)dist_func_param_);
-                if(mydata==NULL){
-                  mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
-                  res=(float*) malloc(maxM0_*sizeof(float)); 
-                  memset(res,0,maxM0_*sizeof(float));  
-                  //printf("We are 1443lines\n");
-                }
 
+                //if(mydata==NULL){
+                  // mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
+                  // res=(float*) malloc(maxM0_*sizeof(float)); 
+                  // memset(res,0,maxM0_*sizeof(float));  
+                  //printf("We are 1443lines\n");
+                //}
+
+                //printf("we are here\n");
                 for (int i= 0; i<size;i++){
                   tableint cand = datal[i];
                   void* curData=getDataByInternalId(cand);
@@ -1384,6 +1397,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
             top_candidates.pop();
         }
+// #ifdef USE_AMX
+//         free(mydata);
+//         free(res);
+// #endif
         return result;
     }
 

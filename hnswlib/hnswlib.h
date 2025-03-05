@@ -24,7 +24,8 @@
 // #define USE_AMX
 // #endif
 
-//#define USE_AMX
+#define USE_AMX
+#define BF16_SUPPORT
 
 #if defined(USE_AVX) || defined(USE_SSE)
 #ifdef _MSC_VER
