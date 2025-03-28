@@ -456,8 +456,8 @@ int main() {
     const char* def_fp32_env = std::getenv("FP32_DEF");
     bool def_enable_fp32 = def_fp32_env ? std::stoi(def_fp32_env) : false;    
     
-    const char* avx512_bf16_env = std::getenv("BF16_AVX512");
-    bool avx512_enable_bf16 = avx512_bf16_env ? std::stoi(avx512_bf16_env) : false;
+    // const char* avx512_bf16_env = std::getenv("BF16_AVX512");
+    // bool avx512_enable_bf16 = avx512_bf16_env ? std::stoi(avx512_bf16_env) : false;
 
 
 
@@ -513,15 +513,15 @@ int main() {
     // }
 
 
-    // if(amx_enable_fp32){
-    //   std::cout << "FP32 with AMX search start." <<"\n";
-    //   start_AMX_fp32 = std::chrono::high_resolution_clock::now();
-    //   for(int i=0;i<iteration;i++){
-    //     call_AMX_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
-    //   }
-    //   end_AMX_fp32 = std::chrono::high_resolution_clock::now();
-    //   std::cout << "FP32 with AMX search end." <<"\n-----------------------------------------------\n\n";
-    // }
+    if(amx_enable_fp32){
+      std::cout << "FP32 with AMX search start." <<"\n";
+      start_AMX_fp32 = std::chrono::high_resolution_clock::now();
+      for(int i=0;i<iteration;i++){
+        call_AMX_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
+      }
+      end_AMX_fp32 = std::chrono::high_resolution_clock::now();
+      std::cout << "FP32 with AMX search end." <<"\n-----------------------------------------------\n\n";
+    }
 
 
     if(amx_enable_bf16){
@@ -541,7 +541,7 @@ int main() {
 
 
     if(def_enable_fp32) std::cout << "Time taken for default fp32:" << duration_scalar_fp32.count()/iteration/nq<<std::endl;
-    if(avx512_enable_bf16) std::cout << "Time taken for bf16 with AVX512:" << duration_scalar_bf16.count()/iteration/nq<<std::endl;
+    // if(avx512_enable_bf16) std::cout << "Time taken for bf16 with AVX512:" << duration_scalar_bf16.count()/iteration/nq<<std::endl;
     if(amx_enable_fp32) std::cout << "Time taken for fp32 with AMX:" << duration_AMX_fp32.count()/iteration/nq<<std::endl;
     if(amx_enable_bf16) std::cout << "Time taken for bf16 with AMX:" << duration_AMX_bf16.count()/iteration/nq<<std::endl;
     fflush(stdout);
