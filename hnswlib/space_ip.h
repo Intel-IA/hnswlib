@@ -42,7 +42,15 @@ int enable_amx() {
     }
     return 1;
 }
+
 #endif
+
+
+inline float bf162float(uint16_t data) {
+  int t = (data<<16);
+  auto a= *reinterpret_cast<float*>(&t);
+  return a;
+}
 
 static float
 InnerProduct(const void *pVect1, const void *pVect2, const void *qty_ptr) {
@@ -543,16 +551,14 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
     _tile_stored(2, results, batchSizeB*2*2);
     _tile_zero(2);
    
+    // printf("tailCount=%d\n",tailCount);
     if (tailCount != 0) {
+        int32_t offset= dims/DIM*DIM;
         for (int k = 0; k < batchSizeA; k++) {
             for (int l = 0; l < batchSizeB; l++) {
-                __m512 result_vec = _mm512_setzero_ps();
-                for (int i = 0; i < tailCount; i += 16) {
-                    __m512 lib_vec = _mm512_loadu_ps((float *)(floatLibraryMatrix[k])  + DIM * blockCount + i);
-                    __m512 query_vec = _mm512_loadu_ps((float *)(floatQueryMatrix + DIM * blockCount + i));
-                    result_vec = _mm512_fmadd_ps(lib_vec, query_vec, result_vec);
-                }
-                results[k * batchSizeB + l] += _mm512_reduce_add_ps(result_vec);
+              for (int m = 0; m < tailCount; m += 1) {
+                results[k * batchSizeB + l] += (*(float *)(floatLibraryMatrix[k]  + 4*(offset+m))) * (*(float *)(floatQueryMatrix + 4*(offset+m)));
+              }
             }
         }
     }
@@ -680,15 +686,17 @@ float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQuer
     _tile_zero(2);
    
     if (tailCount != 0) {
+        int32_t offset= dims/DIM*DIM;
         for (int k = 0; k < batchSizeA; k++) {
             for (int l = 0; l < batchSizeB; l++) {
-                __m512 result_vec = _mm512_setzero_ps();
-                for (int i = 0; i < tailCount; i += 16) {
-                    __m512 lib_vec = _mm512_loadu_ps((float *)(floatLibraryMatrix[k])  + DIM * blockCount + i);
-                    __m512 query_vec = _mm512_loadu_ps((float *)(floatQueryMatrix + DIM * blockCount + i));
-                    result_vec = _mm512_fmadd_ps(lib_vec, query_vec, result_vec);
+                for (int m = 0; m < tailCount; m += 1) {
+                  //blockDim*blockCount+tailBlock/DIM*DIM+i
+                  
+                  results[k * batchSizeB + l] += bf162float(*(uint16_t *)(floatLibraryMatrix[k]  + 2*(offset+m))) * bf162float(*(uint16_t *)(floatQueryMatrix + 2*(offset+m)));
+                    // __m512 lib_vec = _mm512_loadu_ps((float *)(floatLibraryMatrix[k]  + 2*(DIM * blockCount + i)));
+                    // __m512 query_vec = _mm512_loadu_ps((float *)(floatQueryMatrix + 2*(DIM * blockCount + i)));
+                    // result_vec = _mm512_fmadd_ps(lib_vec, query_vec, result_vec);
                 }
-                results[k * batchSizeB + l] += _mm512_reduce_add_ps(result_vec);
             }
         }
     }
@@ -827,11 +835,7 @@ class InnerProductSpace : public SpaceInterface<float> {
 ~InnerProductSpace() {}
 };
 
-float bf162float(uint16_t data) {
-    int t = (data<<16);
-    auto a= *reinterpret_cast<float*>(&t);
-    return a;
-}
+
 static float InnerProductDistanceBf16(const void* a, const void* b, const void *qty_ptr) {
     uint16_t *x = (uint16_t *)a;
     uint16_t *y = (uint16_t *)b;
@@ -946,3 +950,4 @@ class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
     ~Bf16InnerProductSpace() {}
 };
 }  // namespace hnswlib
+

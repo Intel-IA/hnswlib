@@ -229,7 +229,7 @@ inline void ParallelFor_Build(size_t start, size_t end, size_t numThreads, Funct
 
         for (size_t threadId = 0; threadId < numThreads; ++threadId) {
             threads.push_back(std::thread([&, threadId] {
-                setThreadAffinity(pthread_self(), threadId);
+                //setThreadAffinity(pthread_self(), threadId);
                 while (true) {
                     size_t id = current.fetch_add(1);
 
@@ -358,7 +358,7 @@ int call_scalar(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace
 int call_scalar_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProductSpace& space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, top_k);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
@@ -425,14 +425,14 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::Bf16InnerPr
     return 0;
 }
 int main() {
-    int true_dim=1024;
+    int true_dim=30;
     int dim = true_dim/2;               // Dimension of the elements
     size_t max_elements = 10*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
     size_t nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 16;       // Number of threads for operations with index
+    int num_threads = 1;       // Number of threads for operations with index
 
     int top_k=1;
 
@@ -473,7 +473,7 @@ int main() {
     hnswlib::InnerProductSpace space_fp32(true_dim);
     hnswlib::HierarchicalNSW<float>* alg_hnsw_fp32 = new hnswlib::HierarchicalNSW<float>(&space_fp32, max_elements, M, ef_construction);
     // Add data to index
-    ParallelFor_Build(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         alg_hnsw_fp32->addPoint((void*)(data_fp32 + true_dim * row), row);
     });
 
@@ -495,7 +495,7 @@ int main() {
         std::cout << "Default FP32 search start." <<"\n";
         start_scalar_fp32 = std::chrono::high_resolution_clock::now();
         for(int i=0;i<iteration;i++){
-          call_scalar_fp32(alg_hnsw_fp32,space_fp32,query_fp32,true_dim,nq,top_k,num_threads);
+          call_scalar_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
         }
         end_scalar_fp32 = std::chrono::high_resolution_clock::now();
         std::cout << "Default FP32 search end." <<"\n-----------------------------------------------\n\n";
