@@ -362,6 +362,7 @@ static DISTFUNC<float> InnerProductSIMD16Ext = InnerProductSIMD16ExtSSE;
 static DISTFUNC<float> InnerProductSIMD4Ext = InnerProductSIMD4ExtSSE;
 static DISTFUNC<float> InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtSSE;
 static DISTFUNC<float> InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtSSE;
+  
 
 static float
 InnerProductDistanceSIMD16ExtResiduals(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
@@ -392,7 +393,73 @@ InnerProductDistanceSIMD4ExtResiduals(const void *pVect1v, const void *pVect2v, 
 }
 #endif
 
+
 #if defined(USE_AMX)
+static float InnerProductDistanceBf16(const void* a, const void* b, const void *qty_ptr) {
+  uint16_t *x = (uint16_t *)a;
+  uint16_t *y = (uint16_t *)b;
+ // __m512 vr_f32 = _mm512_setzero_ps(); // 初始化累积寄存器为0
+
+  size_t dim = * (size_t*) qty_ptr;
+
+  float dot_product = 0.0f;
+
+  for (int i=0; i < dim; i++) {
+      float x_val = bf162float(x[i]);
+      float y_val = bf162float(y[i]);
+      dot_product += x_val * y_val;
+  }  
+  return 1-dot_product;
+}
+
+
+
+static float InnerProductDistanceBf16AVX512(const void* a, const void* b, const void *qty_ptr) {
+  float result[16] = {0.0f}; // 用于存储中间结果
+
+  uint16_t *x = (uint16_t *)a;
+  uint16_t *y = (uint16_t *)b;
+  __m512 vr_f32 = _mm512_setzero_ps(); // 初始化累积寄存器为0
+
+  size_t dim = * (size_t*) qty_ptr ;
+
+  size_t i = 0;
+  // 每次处理32个元素（16个__bf16元素在__m512bh寄存器中存储为32个uint16_t）
+  for (; i + 32 <= dim; i += 32) {
+      // 加载32个uint16_t到__m512i类型的临时寄存器
+      __m512i temp_x = _mm512_loadu_si512(x + i);
+      __m512i temp_y = _mm512_loadu_si512(y + i);
+
+      // 强制转换为__m512bh类型
+      __m512bh v1_f16 = reinterpret_cast<__m512bh&>(temp_x);
+      __m512bh v2_f16 = reinterpret_cast<__m512bh&>(temp_y);
+
+      // 计算BF16的点积，并将结果累加到vr_f32
+      vr_f32 = _mm512_dpbf16_ps(vr_f32, v1_f16, v2_f16);
+  }
+
+  // 将vr_f32寄存器的值存入result数组
+  _mm512_storeu_ps(result, vr_f32);
+
+  // 累加result数组的所有元素，获得最终的点积结果
+  float dot_product = 0.0f;
+  for (int j = 0; j < 16; j++) {
+      dot_product += result[j];
+  }
+
+  // 处理剩余的元素（小于32的部分）
+  for (; i < dim; i++) {
+      float x_val = bf162float(x[i]);
+      float y_val = bf162float(y[i]);
+      dot_product += x_val * y_val;
+  }
+  //printf("%d %f ",dim,dot_product);
+  return dot_product;
+}
+static float InnerProductDistanceBf16AVX512Ext(const void* a, const void* b, const void *qty_ptr){
+  return 1.0f - InnerProductDistanceBf16AVX512(a, b, qty_ptr);
+}
+
 float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQueryMatrix, uint64_t dims,uint64_t batchSizeA,
                               uint64_t batchSizeB, float *results){
     int DIM=32;
@@ -548,8 +615,8 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
     }
   
    
-    _tile_stored(2, results, batchSizeB*2*2);
-    _tile_zero(2);
+    // _tile_stored(2, results, batchSizeB*2*2);
+    // _tile_zero(2);
    
     // printf("tailCount=%d\n",tailCount);
     if (tailCount != 0) {
@@ -754,8 +821,28 @@ static float InnerProductDistanceBatchExtAMXBF16(const void **pVect1v, const voi
   }
     return 0;
 }
-static AMXDISTFUNC<float> InnerProductBatchExt = InnerProductBatchExtAMX;
+
+static float
+InnerProductDistanceBatchExtAMXBF16Residuals(const void **pVect1v, const void *pVect2v, const void *qty_ptr, size_t nSize, size_t mSize, float * results_amx) {
+    size_t qty = *((size_t *) qty_ptr);
+    size_t qty32 = qty >> 5 << 5;
+
+    InnerProductBatchExtAMXBF16(pVect1v, pVect2v, &qty32,nSize,mSize,results_amx);
+
+    size_t qty_left = qty - qty32;
+
+    float *pVect2 = (float *) pVect2v + qty32;
+    for(size_t i = 0; i < nSize; i++) {
+        float *pVect1 = (float *) pVect1v[i] + qty32;
+        results_amx[i] += InnerProductDistanceBf16AVX512(pVect1, pVect2, &qty_left);
+    }
+    for(size_t i = 0; i < nSize; i++) {
+        results_amx[i] = 1.0f - results_amx[i];
+    }
+    return 0;
+}
 static AMXDISTFUNC<float> InnerProductDistanceBatchExt = InnerProductDistanceBatchExtAMX;
+static DISTFUNC<float> InnerProductDistanceBF16Ext = InnerProductDistanceBf16;
 #endif
 
 class InnerProductSpace : public SpaceInterface<float> {
@@ -805,11 +892,9 @@ class InnerProductSpace : public SpaceInterface<float> {
 #endif
 #if defined(USE_AMX)
     if (AMXCapable()) {
-        InnerProductBatchExt = InnerProductBatchExtAMX;
-        InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMX;
+      amxdistfunc_=InnerProductDistanceBatchExtAMX;
     }
 
-    amxdistfunc_ = InnerProductDistanceBatchExt;
 #endif
         dim_ = dim;
         data_size_ = dim * sizeof(float);
@@ -836,64 +921,6 @@ class InnerProductSpace : public SpaceInterface<float> {
 };
 
 
-static float InnerProductDistanceBf16(const void* a, const void* b, const void *qty_ptr) {
-    uint16_t *x = (uint16_t *)a;
-    uint16_t *y = (uint16_t *)b;
-   // __m512 vr_f32 = _mm512_setzero_ps(); // 初始化累积寄存器为0
-
-    size_t dim = * (size_t*) qty_ptr;
-
-    float dot_product = 0.0f;
-
-    for (int i=0; i < dim; i++) {
-        float x_val = bf162float(x[i]);
-        float y_val = bf162float(y[i]);
-        dot_product += x_val * y_val;
-    }  
-    return 1-dot_product;
-}
-static float InnerProductDistanceBf16AVX512(const void* a, const void* b, const void *qty_ptr) {
-    float result[16] = {0.0f}; // 用于存储中间结果
-
-    uint16_t *x = (uint16_t *)a;
-    uint16_t *y = (uint16_t *)b;
-    __m512 vr_f32 = _mm512_setzero_ps(); // 初始化累积寄存器为0
-
-    size_t dim = * (size_t*) qty_ptr ;
-
-    size_t i = 0;
-    // 每次处理32个元素（16个__bf16元素在__m512bh寄存器中存储为32个uint16_t）
-    for (; i + 32 <= dim; i += 32) {
-        // 加载32个uint16_t到__m512i类型的临时寄存器
-        __m512i temp_x = _mm512_loadu_si512(x + i);
-        __m512i temp_y = _mm512_loadu_si512(y + i);
-
-        // 强制转换为__m512bh类型
-        __m512bh v1_f16 = reinterpret_cast<__m512bh&>(temp_x);
-        __m512bh v2_f16 = reinterpret_cast<__m512bh&>(temp_y);
-
-        // 计算BF16的点积，并将结果累加到vr_f32
-        vr_f32 = _mm512_dpbf16_ps(vr_f32, v1_f16, v2_f16);
-    }
-
-    // 将vr_f32寄存器的值存入result数组
-    _mm512_storeu_ps(result, vr_f32);
-
-    // 累加result数组的所有元素，获得最终的点积结果
-    float dot_product = 0.0f;
-    for (int j = 0; j < 16; j++) {
-        dot_product += result[j];
-    }
-
-    // 处理剩余的元素（小于32的部分）
-    for (; i < dim; i++) {
-        float x_val = bf162float(x[i]);
-        float y_val = bf162float(y[i]);
-        dot_product += x_val * y_val;
-    }
-    //printf("%d %f ",dim,dot_product);
-    return 1 - dot_product;
-}
 class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
     DISTFUNC<float> fstdistfunc_;
 #ifdef USE_AMX
@@ -907,22 +934,26 @@ class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
 #if defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
     #if defined(USE_AVX512)
         if (AVX512Capable()) {
-            InnerProductSIMD16Ext = InnerProductDistanceBf16AVX512;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceBf16AVX512;
+            //InnerProductSIMD16Ext = InnerProductDistanceBf16AVX512;
+            InnerProductDistanceBF16Ext = InnerProductDistanceBf16AVX512Ext;
         } else if (AVXCapable()) {
-            InnerProductSIMD16Ext = InnerProductDistanceBf16;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceBf16;
+            //InnerProductSIMD16Ext = InnerProductDistanceBf16;
+            InnerProductDistanceBF16Ext = InnerProductDistanceBf16;
         }
     #else 
-        InnerProductSIMD16Ext = InnerProductDistanceBf16;
-        InnerProductDistanceSIMD16Ext = InnerProductDistanceBf16;
+        //InnerProductSIMD16Ext = InnerProductDistanceBf16;
+        InnerProductDistanceBF16Ext = InnerProductDistanceBf16;
     #endif
-        fstdistfunc_=InnerProductDistanceSIMD16Ext;     
+        fstdistfunc_=InnerProductDistanceBF16Ext;     
 #endif
 #if defined(USE_AMX)
     if (AMXCapable()) {
-        InnerProductBatchExt = InnerProductBatchExtAMXBF16;
-        InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMXBF16;
+        if (dim%32!=0){
+          InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMXBF16Residuals;
+        }else{
+          InnerProductDistanceBatchExt=InnerProductDistanceBatchExtAMXBF16;
+        }
+          
     }
 
     amxdistfunc_ = InnerProductDistanceBatchExt;

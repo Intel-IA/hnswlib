@@ -425,7 +425,7 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::Bf16InnerPr
     return 0;
 }
 int main() {
-    int true_dim=30;
+    int true_dim=1024;
     int dim = true_dim/2;               // Dimension of the elements
     size_t max_elements = 10*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data

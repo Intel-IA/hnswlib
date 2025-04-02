@@ -1336,30 +1336,23 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 enable_amx();
 
                 size_t dim=(size_t)(*(size_t *)dist_func_param_);
+                if(size > 0){
+                  for (int i= 0; i<size;i++){
+                    tableint cand = datal[i];
+                    void* curData=getDataByInternalId(cand);
+                    mydata[i] = curData;
+                  }
+                  memset(res,0,sizeof(float)*size);
+                  amxdistfunc_((const void**)mydata,(const void*)query_data,(const void*)&dim,size,1,(float*)res);
 
-                //if(mydata==NULL){
-                  // mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
-                  // res=(float*) malloc(maxM0_*sizeof(float)); 
-                  // memset(res,0,maxM0_*sizeof(float));  
-                  //printf("We are 1443lines\n");
-                //}
-
-                //printf("we are here\n");
-                for (int i= 0; i<size;i++){
-                  tableint cand = datal[i];
-                  void* curData=getDataByInternalId(cand);
-                  mydata[i] = curData;
-                }
-                memset(res,0,sizeof(float)*size);
-                amxdistfunc_((const void**)mydata,(const void*)query_data,(const void*)&dim,size,1,(float*)res);
-
-                dist_t *myres= (dist_t *) res;
-                for (int i = 0; i < size; i++) {
-                  dist_t d=(dist_t)myres[i];
-                  if(d < curdist) {
-                    curdist=d;
-                    currObj=datal[i];
-                    changed = true;
+                  dist_t *myres= (dist_t *) res;
+                  for (int i = 0; i < size; i++) {
+                    dist_t d=(dist_t)myres[i];
+                    if(d < curdist) {
+                      curdist=d;
+                      currObj=datal[i];
+                      changed = true;
+                    }
                   }
                 }
 #else
