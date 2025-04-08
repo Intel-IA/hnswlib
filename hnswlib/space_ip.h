@@ -835,9 +835,9 @@ InnerProductDistanceBatchExtAMXBF16Residuals(const void **pVect1v, const void *p
 
     size_t qty_left = qty - qty32;
 
-    float *pVect2 = (float *) pVect2v + qty32;
+    uint16_t *pVect2 = (uint16_t *) pVect2v + qty32;
     for(size_t i = 0; i < nSize; i++) {
-        float *pVect1 = (float *) pVect1v[i] + qty32;
+        uint16_t *pVect1 = (uint16_t *) pVect1v[i] + qty32;
         results_amx[i] += InnerProductDistanceBf16AVX512(pVect1, pVect2, &qty_left);
     }
     for(size_t i = 0; i < nSize; i++) {
