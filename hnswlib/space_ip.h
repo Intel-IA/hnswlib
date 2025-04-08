@@ -670,7 +670,7 @@ static float InnerProductBatchExtAMX(const void **pVect1v, const void *pVect2v, 
 }
 
 float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQueryMatrix, uint64_t dims,uint64_t batchSizeA,
-                              uint64_t batchSizeB, float *results){
+                              uint64_t batchSizeB, float *results_ptr){
     int DIM=32;
     int blockDim = 96;
     int blockCount=((dims))/blockDim;
@@ -683,6 +683,8 @@ float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQuer
     unsigned char ma1Bf16[1024] __attribute__((aligned(64)));
     unsigned char ma2Bf16[1024] __attribute__((aligned(64)));
     unsigned char ma3Bf16[1024] __attribute__((aligned(64)));
+
+    float results[16*16] __attribute__((aligned(64)))={0};
  
     if(!init_mem){
         cfg[0]=1;
@@ -721,6 +723,7 @@ float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQuer
       
       for(int j=0;j<batchSizeA;j++){  
         size_t destOffset1 = j * DIM * 2;
+
         _mm512_store_si512(ma1Bf16 + destOffset1, _mm512_loadu_si512(floatLibraryMatrix[j] + offset));
         _mm512_store_si512(ma2Bf16 + destOffset1, _mm512_loadu_si512(floatLibraryMatrix[j] + offset + 64));
         _mm512_store_si512(ma3Bf16 + destOffset1, _mm512_loadu_si512(floatLibraryMatrix[j] + offset + 128));
@@ -767,6 +770,7 @@ float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQuer
             }
         }
     }
+    memcpy(results_ptr, results, batchSizeA * batchSizeB * sizeof(float));
  
     return 0;
 }
