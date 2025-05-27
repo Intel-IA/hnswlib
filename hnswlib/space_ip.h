@@ -415,15 +415,9 @@ static float InnerProductDistanceBf16AVX512(const void* a, const void* b, const 
       // 计算BF16的点积，并将结果累加到vr_f32
       vr_f32 = _mm512_dpbf16_ps(vr_f32, v1_f16, v2_f16);
   }
-
-  // 将vr_f32寄存器的值存入result数组
-  _mm512_storeu_ps(result, vr_f32);
-
+  
   // 累加result数组的所有元素，获得最终的点积结果
-  float dot_product = 0.0f;
-  for (int j = 0; j < 16; j++) {
-      dot_product += result[j];
-  }
+  float dot_product = _mm512_reduce_add_ps(vr_f32);
 
   // 处理剩余的元素（小于32的部分）
   for (; i < dim; i++) {
